@@ -1,2 +1,11 @@
 .idea/
 .venv/
+*.egg-info/
+
+build/
+content/
+wavs/
+__pycache__/
+outdir/
+
+tacotron2_statedict.pt

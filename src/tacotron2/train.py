@@ -4,22 +4,24 @@ import argparse
 import math
 from numpy import finfo
 
-import torch
-from distributed import apply_gradient_allreduce
-import torch.distributed as dist
-from torch.utils.data.distributed import DistributedSampler
-from torch.utils.data import DataLoader
 
-from model import Tacotron2
-from data_utils import TextMelLoader, TextMelCollate
-from loss_function import Tacotron2Loss
-from logger import Tacotron2Logger
-from hparams import create_hparams
+import torch
+import torch.distributed
+from apex import amp
+from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
+
+from tacotron2.data_utils import TextMelLoader, TextMelCollate
+from tacotron2.distributed import apply_gradient_allreduce
+from tacotron2.hparams import create_hparams
+from tacotron2.logger import Tacotron2Logger
+from tacotron2.loss_function import Tacotron2Loss
+from tacotron2.model import Tacotron2
 
 
 def reduce_tensor(tensor, n_gpus):
     rt = tensor.clone()
-    dist.all_reduce(rt, op=dist.reduce_op.SUM)
+    torch.distributed.all_reduce(rt, op=torch.distributed.reduce_op.SUM)
     rt /= n_gpus
     return rt
 
@@ -32,7 +34,7 @@ def init_distributed(hparams, n_gpus, rank, group_name):
     torch.cuda.set_device(rank % torch.cuda.device_count())
 
     # Initialize distributed communication
-    dist.init_process_group(
+    torch.distributed.init_process_group(
         backend=hparams.dist_backend, init_method=hparams.dist_url,
         world_size=n_gpus, rank=rank, group_name=group_name)
 
@@ -104,7 +106,7 @@ def load_checkpoint(checkpoint_path, model, optimizer):
     optimizer.load_state_dict(checkpoint_dict['optimizer'])
     learning_rate = checkpoint_dict['learning_rate']
     iteration = checkpoint_dict['iteration']
-    print("Loaded checkpoint '{}' from iteration {}" .format(
+    print("Loaded checkpoint '{}' from iteration {}".format(
         checkpoint_path, iteration))
     return model, optimizer, learning_rate, iteration
 
@@ -171,7 +173,6 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
                                  weight_decay=hparams.weight_decay)
 
     if hparams.fp16_run:
-        from apex import amp
         model, optimizer = amp.initialize(
             model, optimizer, opt_level='O2')
 
@@ -242,11 +243,12 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
                 logger.log_training(
                     reduced_loss, grad_norm, learning_rate, duration, iteration)
 
-            if not is_overflow and (iteration % hparams.iters_per_checkpoint == 0):
-                validate(model, criterion, valset, iteration,
-                         hparams.batch_size, n_gpus, collate_fn, logger,
-                         hparams.distributed_run, rank)
-                if rank == 0:
+            if not is_overflow:
+                if iteration % hparams.iters_per_validate == 0:
+                    validate(model, criterion, valset, iteration,
+                             hparams.batch_size, n_gpus, collate_fn, logger,
+                             hparams.distributed_run, rank)
+                if rank == 0 and (iteration % hparams.iters_per_checkpoint == 0):
                     checkpoint_path = os.path.join(
                         output_directory, "checkpoint_{}".format(iteration))
                     save_checkpoint(model, optimizer, learning_rate, iteration,
@@ -255,7 +257,7 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
             iteration += 1
 
 
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-o', '--output_directory', type=str,
                         help='directory to save checkpoints')
@@ -288,3 +290,7 @@ if __name__ == '__main__':
 
     train(args.output_directory, args.log_directory, args.checkpoint_path,
           args.warm_start, args.n_gpus, args.rank, args.group_name, hparams)
+
+
+if __name__ == '__main__':
+    main()
